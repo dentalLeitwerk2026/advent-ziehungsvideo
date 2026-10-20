@@ -1,0 +1,6 @@
+{
+  "name": "advent-ziehungsvideo",
+  "private": true,
+  "description": "Erzeugt nach jeder Adventskalender-Ziehung das Video für Instagram und LinkedIn.",
+  "dependencies": { "playwright": "1.48.2" }
+}

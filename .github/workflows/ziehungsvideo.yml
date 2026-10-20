@@ -1,0 +1,86 @@
+name: Ziehungsvideo
+
+# Wird von Make direkt nach der Ziehung angestoßen (repository_dispatch, Typ "ziehung").
+# Von Hand startbar über "Run workflow" (zum Testen).
+on:
+  repository_dispatch:
+    types: [ziehung]
+  workflow_dispatch:
+    inputs:
+      day:       { description: 'Türchen (1–24)', required: true, default: '3' }
+      ticket:    { description: 'Losnummer, z. B. NUSS-05661', required: true, default: 'NUSS-05661' }
+      stufe:     { description: 'Preisstufe P1–P6', required: true, default: 'P5' }
+      antworten: { description: 'Anzahl Antworten', required: true, default: '127' }
+      melden:    { description: 'Make Bescheid geben (ja/nein)', required: true, default: 'nein' }
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ziehungsvideo
+  cancel-in-progress: false
+
+jobs:
+  video:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      P_DAY:       ${{ github.event.client_payload.day       || inputs.day }}
+      P_TICKET:    ${{ github.event.client_payload.ticket    || inputs.ticket }}
+      P_STUFE:     ${{ github.event.client_payload.stufe     || inputs.stufe }}
+      P_ANTWORTEN: ${{ github.event.client_payload.antworten || inputs.antworten }}
+      P_MELDEN:    ${{ github.event_name == 'repository_dispatch' && 'ja' || inputs.melden }}
+      PAGES_BASE:  https://dentalleitwerk2026.github.io/advent-ziehungsvideo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Werkzeuge installieren
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Video erzeugen
+        id: render
+        run: |
+          DAY=$(printf '%02d' "$P_DAY")
+          FILE="videos/tuer-${DAY}-${GITHUB_RUN_ID}.mp4"
+          node render.js "$(jq -nc --arg d "$P_DAY" --arg t "$P_TICKET" --arg s "$P_STUFE" --arg a "$P_ANTWORTEN" \
+            '{day:($d|tonumber), ticket:$t, stufe:$s, antworten:($a|tonumber? // 0)}')" "docs/$FILE"
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Video veröffentlichen (GitHub Pages)
+        run: |
+          git config user.name  "ziehungsvideo-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add docs/videos
+          git commit -m "Ziehungsvideo Türchen ${P_DAY}"
+          for i in 1 2 3; do git pull --rebase -q && git push -q && break; sleep 5; done
+
+      - name: Warten, bis das Video öffentlich erreichbar ist
+        run: |
+          URL="$PAGES_BASE/${{ steps.render.outputs.file }}"
+          for i in $(seq 1 40); do
+            if curl -sfI "$URL" > /dev/null; then echo "Erreichbar: $URL"; exit 0; fi
+            sleep 15
+          done
+          echo "Video nach 10 Minuten nicht erreichbar: $URL"; exit 1
+
+      - name: Make Bescheid geben
+        if: env.P_MELDEN == 'ja'
+        env:
+          HOOK: ${{ secrets.MAKE_VIDEO_WEBHOOK }}
+        run: |
+          curl -sf -X POST "$HOOK" -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg d "$P_DAY" --arg u "$PAGES_BASE/${{ steps.render.outputs.file }}" '{status:"ok", day:($d|tonumber), video_url:$u}')"
+
+      - name: Fehler an Make melden
+        if: failure() && env.P_MELDEN == 'ja'
+        env:
+          HOOK: ${{ secrets.MAKE_VIDEO_WEBHOOK }}
+        run: |
+          curl -s -X POST "$HOOK" -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg d "$P_DAY" --arg r "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '{status:"fehler", day:($d|tonumber? // 0), run_url:$r}')"
