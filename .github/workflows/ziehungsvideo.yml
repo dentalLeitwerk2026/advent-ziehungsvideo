@@ -1,10 +1,12 @@
 name: Ziehungsvideo
 
-# Wird von Make direkt nach der Ziehung angestoßen (repository_dispatch, Typ "ziehung").
+# Wird von Make direkt nach der Ziehung angestoßen: Make legt eine Datei auftraege/tuer-XX-*.json an
+# (nur Türchen, Losnummer, Preisstufe, Anzahl Antworten – keine Personendaten).
 # Von Hand startbar über "Run workflow" (zum Testen).
 on:
-  repository_dispatch:
-    types: [ziehung]
+  push:
+    branches: [main]
+    paths: ['auftraege/*.json']
   workflow_dispatch:
     inputs:
       day:       { description: 'Türchen (1–24)', required: true, default: '3' }
@@ -25,14 +27,37 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      P_DAY:       ${{ github.event.client_payload.day       || inputs.day }}
-      P_TICKET:    ${{ github.event.client_payload.ticket    || inputs.ticket }}
-      P_STUFE:     ${{ github.event.client_payload.stufe     || inputs.stufe }}
-      P_ANTWORTEN: ${{ github.event.client_payload.antworten || inputs.antworten }}
-      P_MELDEN:    ${{ github.event_name == 'repository_dispatch' && 'ja' || inputs.melden }}
       PAGES_BASE:  https://dentalleitwerk2026.github.io/advent-ziehungsvideo
+      MAKE_HOOK:   https://hook.eu1.make.com/klfgpnq0ruy31httbzhd0kckbg99cbev
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+
+      - name: Auftrag lesen
+        env:
+          IN_DAY: ${{ inputs.day }}
+          IN_TICKET: ${{ inputs.ticket }}
+          IN_STUFE: ${{ inputs.stufe }}
+          IN_ANTWORTEN: ${{ inputs.antworten }}
+          IN_MELDEN: ${{ inputs.melden }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            F=$(git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'auftraege/*.json' | tail -1)
+            [ -n "$F" ] || { echo "Keine Auftragsdatei im Commit"; exit 1; }
+            echo "Auftrag: $F"
+            {
+              echo "P_DAY=$(jq -r '.day' "$F")"
+              echo "P_TICKET=$(jq -r '.ticket' "$F")"
+              echo "P_STUFE=$(jq -r '.stufe' "$F")"
+              echo "P_ANTWORTEN=$(jq -r '.antworten // 0' "$F")"
+              echo "P_MELDEN=ja"
+            } >> "$GITHUB_ENV"
+          else
+            {
+              echo "P_DAY=$IN_DAY"; echo "P_TICKET=$IN_TICKET"; echo "P_STUFE=$IN_STUFE"
+              echo "P_ANTWORTEN=$IN_ANTWORTEN"; echo "P_MELDEN=$IN_MELDEN"
+            } >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
@@ -57,7 +82,7 @@ jobs:
           git config user.name  "ziehungsvideo-bot"
           git config user.email "actions@users.noreply.github.com"
           git add docs/videos
-          git commit -m "Ziehungsvideo Türchen ${P_DAY}"
+          git commit -m "Ziehungsvideo Türchen ${P_DAY} [skip ci]"
           for i in 1 2 3; do git pull --rebase -q && git push -q && break; sleep 5; done
 
       - name: Warten, bis das Video öffentlich erreichbar ist
@@ -71,16 +96,12 @@ jobs:
 
       - name: Make Bescheid geben
         if: env.P_MELDEN == 'ja'
-        env:
-          HOOK: ${{ secrets.MAKE_VIDEO_WEBHOOK }}
         run: |
-          curl -sf -X POST "$HOOK" -H 'Content-Type: application/json' \
+          curl -sf -X POST "$MAKE_HOOK" -H 'Content-Type: application/json' \
             -d "$(jq -nc --arg d "$P_DAY" --arg u "$PAGES_BASE/${{ steps.render.outputs.file }}" '{status:"ok", day:($d|tonumber), video_url:$u}')"
 
       - name: Fehler an Make melden
         if: failure() && env.P_MELDEN == 'ja'
-        env:
-          HOOK: ${{ secrets.MAKE_VIDEO_WEBHOOK }}
         run: |
-          curl -s -X POST "$HOOK" -H 'Content-Type: application/json' \
+          curl -s -X POST "$MAKE_HOOK" -H 'Content-Type: application/json' \
             -d "$(jq -nc --arg d "$P_DAY" --arg r "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '{status:"fehler", day:($d|tonumber? // 0), run_url:$r}')"
